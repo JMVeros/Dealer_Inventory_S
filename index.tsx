@@ -287,6 +287,10 @@ const App = () => {
     const [theme, setTheme] = useState('light');
 
     const supabase = useMemo(() => {
+        if (!supabaseUrl || !supabaseAnonKey) {
+            console.error("Supabase URL or Anon Key is missing.");
+            return null;
+        }
         return createClient(supabaseUrl, supabaseAnonKey);
     }, []);
 
