@@ -103,6 +103,50 @@ body {
   position: relative;
 }
 
+.dealer-input-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.dealer-input-wrapper input {
+  padding-right: 2.5rem; /* Make space for indicator */
+}
+
+.dealer-status-indicator {
+  position: absolute;
+  right: 0.75rem;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.status-icon-success {
+  color: var(--green-primary);
+}
+
+.status-icon-error {
+  color: #ef4444; /* red-500 */
+}
+
+.status-spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid var(--text-secondary);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
 .suggestions-list {
   position: absolute;
   top: calc(100% + 4px);
@@ -701,6 +745,15 @@ select:disabled {
   --logo-color: var(--blue-primary);
   --shadow: 0 4px 6px -1px rgb(0 0 0 / 0.2), 0 2px 4px -2px rgb(0 0 0 / 0.2);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.3), 0 4px 6px -4px rgb(0 0 0 / 0.3);
+}
+
+[data-theme="dark"] .status-icon-error {
+  color: #f87171; /* red-400 */
+}
+
+[data-theme="dark"] .status-spinner {
+  border-color: var(--text-secondary);
+  border-top-color: transparent;
 }
 
 [data-theme="dark"] .header-text h1 {

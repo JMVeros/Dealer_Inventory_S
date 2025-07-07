@@ -1,37 +1,8 @@
+
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient, type PostgrestSingleResponse } from '@supabase/supabase-js';
 
-// --- Environment Variable Helper ---
-const safeGetEnv = (key: string): string | undefined => {
-    // For React apps, environment variables are available at build time
-    // and embedded in the bundle for variables starting with REACT_APP_
-    if (typeof window !== 'undefined') {
-        // In browser environment, check for variables embedded in `window.__ENV__`
-        // or available via a polyfilled `process.env`.
-        const windowEnv = (window as any).__ENV__?.[key];
-        if (windowEnv) {
-            return windowEnv;
-        }
-        // Safely check process.env only if it exists.
-        if (typeof process !== 'undefined' && process.env) {
-            return process.env[key];
-        }
-    }
-    
-    // During build/server-side (when window is not defined)
-    if (typeof process !== 'undefined' && process.env) {
-        return process.env[key];
-    }
-    
-    return undefined;
-};
-
-
-// --- Supabase Setup ---
-const supabaseUrl = safeGetEnv('REACT_APP_SUPABASE_URL');
-const supabaseAnonKey = safeGetEnv('REACT_APP_SUPABASE_ANON_KEY');
-const marketcheckApiKey = safeGetEnv('REACT_APP_MARKETCHECK_API_KEY') || '';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('Root element not found');
@@ -42,9 +13,20 @@ const VEHICLES_PER_PAGE = 21;
 
 
 // --- Type Definitions ---
+interface AppConfig {
+    supabaseUrl: string;
+    supabaseAnonKey: string;
+    marketcheckApiKey: string;
+}
+
 interface Dealer {
   dealer_name: string;
   website?: string;
+}
+
+interface DealerSite {
+    dealer_name: string;
+    website: string | null;
 }
 
 interface Vehicle {
@@ -63,6 +45,33 @@ interface Vehicle {
   trim: string | null;
 }
 
+interface MarketcheckListing {
+    id?: string;
+    vin?: string;
+    heading?: string;
+    price?: string | number;
+    miles?: string | number | null;
+    vdp_url?: string;
+    media?: {
+        photo_links?: string[];
+    };
+    build?: {
+        year?: number;
+        make?: string;
+        model?: string;
+        trim?: string;
+    };
+    body_type?: string;
+}
+
+interface MarketcheckApiResponse {
+    num_found?: number;
+    listings?: MarketcheckListing[];
+    error?: {
+        message?: string;
+    };
+}
+
 interface NoInventoryInfo {
   dealerName: string;
   source: string;
@@ -79,6 +88,9 @@ interface Filters {
     model: string;
     trim: string;
 }
+
+type DealerStatus = 'idle' | 'checking' | 'online' | 'error';
+
 
 const initialFiltersState: Filters = {
     yearFrom: '',
@@ -103,6 +115,19 @@ const FilterIcon = () => (
         <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"></path>
     </svg>
 );
+const CheckCircleIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="status-icon-success">
+        <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline>
+    </svg>
+);
+const XCircleIcon = () => (
+    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="status-icon-error">
+        <circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line>
+    </svg>
+);
+const LoadingSpinner = () => (
+    <div className="status-spinner"></div>
+);
 
 
 // --- Helper Functions ---
@@ -119,6 +144,24 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 
 // --- Child Components ---
+const DealerStatusIndicator = ({ status }: { status: DealerStatus }) => {
+    if (status === 'idle') return null;
+
+    const messages = {
+        checking: 'Checking dealer inventory...',
+        online: 'Dealer inventory is online',
+        error: 'Could not connect to dealer inventory',
+    };
+
+    return (
+        <div className="dealer-status-indicator" title={messages[status]}>
+            {status === 'checking' && <LoadingSpinner />}
+            {status === 'online' && <CheckCircleIcon />}
+            {status === 'error' && <XCircleIcon />}
+        </div>
+    );
+};
+
 interface PaginationProps {
   itemsPerPage: number;
   totalItems: number;
@@ -295,6 +338,9 @@ const Footer = () => {
 
 // --- Main App Component ---
 const App = () => {
+    const [config, setConfig] = useState<AppConfig | null>(null);
+    const [configError, setConfigError] = useState<string | null>(null);
+
     const [dealershipName, setDealershipName] = useState<string>('');
     const [amountQualified, setAmountQualified] = useState<string>('');
     
@@ -317,14 +363,53 @@ const App = () => {
     const [suggestionsVisible, setSuggestionsVisible] = useState(false);
     const [highlightedIndex, setHighlightedIndex] = useState(-1);
     const suggestionsRef = useRef<HTMLDivElement>(null);
+    
+    // --- Dealer Status State ---
+    const [selectedDealer, setSelectedDealer] = useState<Dealer | null>(null);
+    const [dealerStatus, setDealerStatus] = useState<DealerStatus>('idle');
+
+
+    useEffect(() => {
+        const loadConfig = async () => {
+            try {
+                const response = await fetch('/.netlify/functions/env');
+                if (!response.ok) {
+                    if (response.status === 404) {
+                         throw new Error("Configuration endpoint not found. If developing locally, please run the app using the Netlify CLI ('netlify dev').");
+                    }
+                    throw new Error(`Configuration server returned status ${response.status}`);
+                }
+                const configData = await response.json();
+                
+                const { 
+                    REACT_APP_SUPABASE_URL: supabaseUrl, 
+                    REACT_APP_SUPABASE_ANON_KEY: supabaseAnonKey, 
+                    REACT_APP_MARKETCHECK_API_KEY: marketcheckApiKey 
+                } = configData;
+
+                if (!supabaseUrl || !supabaseAnonKey || !marketcheckApiKey) {
+                    throw new Error("One or more required API keys are missing from the server configuration. Check your Netlify environment variables.");
+                }
+
+                setConfig({
+                    supabaseUrl,
+                    supabaseAnonKey,
+                    marketcheckApiKey,
+                });
+            } catch (error: any) {
+                console.error("Failed to load application configuration:", error);
+                setConfigError(`Failed to load application configuration:\n${error.message}`);
+            }
+        };
+        loadConfig();
+    }, []);
 
     const supabase: SupabaseClient | null = useMemo(() => {
-        if (!supabaseUrl || !supabaseAnonKey) {
-            console.error("Supabase URL or Anon Key is missing.");
+        if (!config?.supabaseUrl || !config?.supabaseAnonKey) {
             return null;
         }
-        return createClient(supabaseUrl, supabaseAnonKey);
-    }, []);
+        return createClient(config.supabaseUrl, config.supabaseAnonKey);
+    }, [config]);
 
     useEffect(() => {
         document.documentElement.setAttribute('data-theme', theme);
@@ -376,16 +461,58 @@ const App = () => {
             clearTimeout(handler);
         };
     }, [dealershipName, supabase]);
+    
+    useEffect(() => {
+        if (!selectedDealer?.website || !config) {
+            setDealerStatus('idle');
+            return;
+        }
+
+        const checkStatus = async () => {
+            setDealerStatus('checking');
+            try {
+                const apiUrl = new URL('https://mc-api.marketcheck.com/v2/car/dealer/inventory/active');
+                apiUrl.searchParams.append('api_key', config.marketcheckApiKey);
+                apiUrl.searchParams.append('source', selectedDealer.website as string);
+                apiUrl.searchParams.append('rows', '0');
+
+                const response = await fetch(apiUrl.toString());
+                if (!response.ok) {
+                    throw new Error('API request failed');
+                }
+                const data: MarketcheckApiResponse = await response.json();
+                if (data.num_found && data.num_found > 0) {
+                    setDealerStatus('online');
+                } else {
+                    setDealerStatus('error'); // No inventory found is an error for our purposes
+                }
+            } catch (error) {
+                console.error('Dealer status check failed:', error);
+                setDealerStatus('error');
+            }
+        };
+
+        const timer = setTimeout(() => {
+            checkStatus();
+        }, 300); // Small delay to feel responsive but not jarring
+
+        return () => clearTimeout(timer);
+
+    }, [selectedDealer, config]);
+
 
     const handleDealershipChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         setDealershipName(e.target.value);
         setHighlightedIndex(-1);
         setSuggestionsVisible(true);
+        setSelectedDealer(null);
+        setDealerStatus('idle');
     };
 
-    const handleSuggestionClick = (dealerName: string) => {
-        setDealershipName(dealerName);
+    const handleSuggestionClick = (dealer: Dealer) => {
+        setDealershipName(dealer.dealer_name);
         setSuggestionsVisible(false);
+        setSelectedDealer(dealer);
     };
     
     const handleDealerKeyDown = (e: React.KeyboardEvent) => {
@@ -400,7 +527,7 @@ const App = () => {
         } else if (e.key === 'Enter') {
             if (highlightedIndex > -1) {
                 e.preventDefault();
-                handleSuggestionClick(suggestions[highlightedIndex].dealer_name);
+                handleSuggestionClick(suggestions[highlightedIndex]);
             }
         } else if (e.key === 'Escape') {
             setSuggestionsVisible(false);
@@ -423,7 +550,7 @@ const App = () => {
         e.preventDefault();
         setSuggestionsVisible(false);
 
-        const performSearch = async () => {
+        const performSearch = async (): Promise<void> => {
             setLoadingVehicles(true);
             setErrorVehicles(null);
             setNoInventoryInfo(null);
@@ -432,49 +559,41 @@ const App = () => {
             setCurrentPage(1);
             setFilters(initialFiltersState);
 
-            const numericAmount = Number(amountQualified.replace(/[^0-9.]/g, ''));
-
-            if (!dealershipName) {
-                setErrorVehicles("Please enter a dealership name.");
-                setLoadingVehicles(false);
-                return;
-            }
-            if (!numericAmount || numericAmount <= 0) {
-                setErrorVehicles("Please enter a valid qualified amount.");
-                setLoadingVehicles(false);
-                return;
-            }
-            if (!supabase) {
-                setErrorVehicles("Database connection is not available.");
-                setLoadingVehicles(false);
-                return;
-            }
-            if (!marketcheckApiKey) {
-                setErrorVehicles("Vehicle search is temporarily unavailable. Please contact support.");
-                setLoadingVehicles(false);
-                return;
-            }
-            
-            const { data: dealerData, error: dealerError } = await supabase
-                .from('dealer_site')
-                .select('dealer_name, website')
-                .eq('dealer_name', dealershipName.trim())
-                .limit(1)
-                .single();
-
-            if (dealerError || !dealerData || !dealerData.website) {
-                setErrorVehicles(`Could not find a website for "${dealershipName}". Please select a valid dealership from the suggestion list.`);
-                setLoadingVehicles(false);
-                return;
-            }
-
-            const source = dealerData.website;
-
             try {
+                const numericAmount = Number(amountQualified.replace(/[^0-9]/g, ''));
+
+                if (!dealershipName) {
+                    throw new Error("Please enter a dealership name.");
+                }
+                if (!numericAmount || numericAmount <= 0) {
+                    throw new Error("Please enter a valid qualified amount.");
+                }
+                if (!supabase) {
+                    throw new Error("Database connection is not available.");
+                }
+                if (!config?.marketcheckApiKey) {
+                    throw new Error("Vehicle search is temporarily unavailable. Please contact support.");
+                }
+                
+                const { data: dealerData, error: dealerError }: PostgrestSingleResponse<DealerSite> = await supabase
+                    .from('dealer_site')
+                    .select('dealer_name, website')
+                    .eq('dealer_name', dealershipName.trim())
+                    .limit(1)
+                    .single();
+
+                if (dealerError) {
+                    throw new Error(`Failed to fetch dealership information: ${dealerError.message}`);
+                }
+                if (!dealerData || !dealerData.website) {
+                    throw new Error(`Could not find a website for "${dealershipName}". Please select a valid dealership from the suggestion list.`);
+                }
+
+                const source = dealerData.website;
                 const API_PAGE_SIZE = 50;
         
                 const firstApiUrl = new URL('https://mc-api.marketcheck.com/v2/car/dealer/inventory/active');
-                firstApiUrl.searchParams.append('api_key', marketcheckApiKey);
+                firstApiUrl.searchParams.append('api_key', config.marketcheckApiKey);
                 firstApiUrl.searchParams.append('source', source);
                 firstApiUrl.searchParams.append('car_type', 'used');
                 firstApiUrl.searchParams.append('rows', API_PAGE_SIZE.toString());
@@ -486,7 +605,7 @@ const App = () => {
                 if (!firstResponse.ok) {
                     let errorBody = 'An unknown API error occurred.';
                     try {
-                        const errorJson = await firstResponse.json();
+                        const errorJson: MarketcheckApiResponse = await firstResponse.json();
                         errorBody = errorJson.error?.message || JSON.stringify(errorJson);
                     } catch (jsonError) {
                         errorBody = `Status ${firstResponse.status} ${firstResponse.statusText}`;
@@ -494,7 +613,7 @@ const App = () => {
                     throw new Error(`API Request Failed: ${errorBody}\n\nURL Used: ${firstApiUrl.toString()}`);
                 }
         
-                const firstApiResponse = await firstResponse.json();
+                const firstApiResponse: MarketcheckApiResponse = await firstResponse.json();
                 const numFound = firstApiResponse.num_found || 0;
                 const initialListings = firstApiResponse.listings || [];
         
@@ -507,15 +626,19 @@ const App = () => {
                     });
                     setVehicles([]);
                 } else {
-                    let allListings = [...initialListings];
+                    let allListings: MarketcheckListing[] = [...initialListings];
                     const totalPages = Math.ceil(numFound / API_PAGE_SIZE);
                     
                     if (totalPages > 1) {
-                        for (let i = 1; i < totalPages; i++) {
-                            await delay(250);
+                        // Fetch all pages, but limit to a reasonable number to avoid excessive requests.
+                        const maxPagesToFetch = 10; // ~500 vehicles
+                        const pagesToFetch = Math.min(totalPages, maxPagesToFetch);
+
+                        for (let i = 1; i < pagesToFetch; i++) {
+                            await delay(250); // Be respectful to the API
 
                             const apiUrl = new URL('https://mc-api.marketcheck.com/v2/car/dealer/inventory/active');
-                            apiUrl.searchParams.append('api_key', marketcheckApiKey);
+                            apiUrl.searchParams.append('api_key', config.marketcheckApiKey);
                             apiUrl.searchParams.append('source', source);
                             apiUrl.searchParams.append('car_type', 'used');
                             apiUrl.searchParams.append('rows', API_PAGE_SIZE.toString());
@@ -525,9 +648,9 @@ const App = () => {
                             const pageResponse = await fetch(apiUrl.toString());
                             if (!pageResponse.ok) {
                                  console.warn(`API Error for ${apiUrl.toString()}: ${pageResponse.status} ${pageResponse.statusText}`);
-                                 continue;
+                                 continue; // Skip this page on error
                             }
-                            const pageData = await pageResponse.json();
+                            const pageData: MarketcheckApiResponse = await pageResponse.json();
                             if (pageData.listings && pageData.listings.length > 0) {
                                 allListings.push(...pageData.listings);
                             }
@@ -544,7 +667,7 @@ const App = () => {
                     if (filteredListings.length === 0) {
                         setVehicles([]);
                     } else {
-                         const formattedVehicles: Vehicle[] = filteredListings.map((listing: any, index: number) => ({
+                         const formattedVehicles: Vehicle[] = filteredListings.map((listing, index) => ({
                             id: listing.id || listing.vin || `non-vin-listing-${index}`,
                             vin: listing.vin || 'N/A',
                             name: String(listing.heading || 'Untitled Vehicle'),
@@ -563,21 +686,18 @@ const App = () => {
                     }
                 }
             } catch (error: any) {
-                setErrorVehicles(error.message);
+                console.error("Search failed:", error);
+                setErrorVehicles(error.message || "An unexpected error occurred during the search.");
             } finally {
                 setLoadingVehicles(false);
             }
         };
 
-        performSearch().catch((err) => {
-            console.error("Search failed:", err);
-            setErrorVehicles("An unexpected error occurred during the search.");
-            setLoadingVehicles(false);
-        });
+        performSearch();
     };
 
 
-    const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleAmountChange: React.ChangeEventHandler<HTMLInputElement> = (e) => {
         const rawValue = e.target.value;
         const numericString = rawValue.replace(/[^0-9]/g, '');
 
@@ -593,18 +713,42 @@ const App = () => {
         setSearched(false);
     };
     
-    const numericAmountValue = Number(amountQualified.replace(/[^0-9.]/g, ''));
+    const numericAmountValue = Number(amountQualified.replace(/[^0-9]/g, ''));
 
     const filteredVehicles = useMemo(() => {
-        return vehicles.filter(v => {
-            const { yearFrom, yearTo, maxMileage, bodyType, make, model, trim } = filters;
-            if (yearFrom && v.year && v.year < parseInt(yearFrom)) return false;
-            if (yearTo && v.year && v.year > parseInt(yearTo)) return false;
-            if (maxMileage && v.miles && v.miles > parseInt(maxMileage)) return false;
-            if (bodyType && v.bodyType !== bodyType) return false;
-            if (make && v.make !== make) return false;
-            if (model && v.model !== model) return false;
-            if (trim && v.trim !== trim) return false;
+        const { yearFrom, yearTo, maxMileage, bodyType, make, model, trim } = filters;
+        const yearFromNum = yearFrom ? parseInt(yearFrom, 10) : null;
+        const yearToNum = yearTo ? parseInt(yearTo, 10) : null;
+        const maxMileageNum = maxMileage ? parseInt(maxMileage, 10) : null;
+
+        // If no filters are active, return all vehicles.
+        const noFiltersActive = !yearFromNum && !yearToNum && !maxMileageNum && !bodyType && !make && !model && !trim;
+        if (noFiltersActive) {
+            return vehicles;
+        }
+
+        return vehicles.filter((v: Vehicle) => {
+            if (yearFromNum && v.year != null && v.year < yearFromNum) {
+                return false;
+            }
+            if (yearToNum && v.year != null && v.year > yearToNum) {
+                return false;
+            }
+            if (maxMileageNum && v.miles != null && v.miles > maxMileageNum) {
+                return false;
+            }
+            if (bodyType && v.bodyType !== bodyType) {
+                return false;
+            }
+            if (make && v.make !== make) {
+                return false;
+            }
+            if (model && v.model !== model) {
+                return false;
+            }
+            if (trim && v.trim !== trim) {
+                return false;
+            }
             return true;
         });
     }, [vehicles, filters]);
@@ -645,7 +789,7 @@ const App = () => {
             );
         }
 
-        const resultsHeader = vehicles.length > 0 && (
+        const resultsHeader = vehicles.length > 0 ? (
             <div className="results-header">
                 <p className="results-count">
                     Showing <strong>{filteredVehicles.length}</strong> of <strong>{vehicles.length}</strong> vehicles
@@ -654,7 +798,7 @@ const App = () => {
                     <FilterIcon /> Filter
                 </button>
             </div>
-        );
+        ) : null;
 
         if (filteredVehicles.length > 0) {
             return (
@@ -712,6 +856,26 @@ const App = () => {
         );
     };
 
+    if (configError) {
+        return (
+            <div className="app-container">
+                <main style={{ paddingTop: '2rem' }}>
+                    <p className="error-message">{configError}</p>
+                </main>
+            </div>
+        );
+    }
+
+    if (!config) {
+        return (
+            <div className="app-container">
+                 <main style={{ paddingTop: '2rem' }}>
+                    <p className="status-message">Loading configuration...</p>
+                </main>
+            </div>
+        );
+    }
+
     return (
         <div className="app-container">
             <header className="header">
@@ -720,7 +884,7 @@ const App = () => {
                     preserveAspectRatio="xMidYMid meet">
                     <g transform="translate(0.000000,116.000000) scale(0.100000,-0.100000)"
                     fill="currentColor" stroke="none">
-                    <path d="M1375 1113 c-214 -9 -526 -60 -580 -93 -70 -43 -165 -170 -244 -325 l-38 -74 -23 24 c-15 16 -20 30 -15 44 10 33 -3 58 -36 70 -45 15 -189 26 -189 14 0 -9 33 -41 115 -112 l39 -34 -38 7 c-90 17 -110 29 -135 80 -29 57 -37 51 -18 -14 15 -53 45 -76 150 -116 40 -15 74 -29 76 -31 2 -1 -30 -38 -71 -81 -58 -61 -77 -88 -86 -125 -15 -56 -16 -187 -2 -187 6 0 10 29 10 68 1 71 17 131 45 161 9 10 53 44 99 76 l84 57 118 -85 c131 -93 284 -191 290 -184 2 2 -16 18 -40 35 -56 40 -175 140 -247 207 l-57 52 92 11 c342 42 1481 39 1810 -4 l50 -7 -70 -64 c-38 -35 -105 -91 -148 -126 -44 -34 -91 -72 -105 -85 -26 -23 -26 -23 -2 -11 45 22 225 141 303 200 43 33 80 59 83 59 3 0 46 -28 95 -63 109 -75 129 -108 138 -230 6 -78 6 -80 14 -37 9 55 0 143 -19 189 -8 18 -45 65 -83 104 l-68 69 41 16 c23 9 69 30 102 47 54 27 62 35 78 79 24 67 16 80 -14 20 -25 -51 -40 -60 -129 -79 -33 -7 -31 -5 45 69 l80 77 -82 -5 c-45 -3 -98 -12 -117 -20 -32 -13 -36 -19 -36 -51 0 -21 -8 -47 -20 -62 l-19 -24 -37 73 c-74 148 -161 268 -227 316 -101 72 -562 123 -962 105z m570 -83 c88 -5 202 -15 254 -22 93 -12 94 -12 123 -52 58 -80 128 -246 128 -302 0 -5 -120 -10 -268 -12 -147 -1 -349 -7 -448 -12 -116 -7 -241 -7 -345 -1 -90 6 -253 11 -362 13 l-198 3 -6 24 c-3 13 -3 74 0 135 4 69 2 105 -3 96 -15 -24 -60 -162 -68 -210 -7 -41 -9 -43 -45 -44 -45 -1 -45 4 -16 100 26 84 78 190 111 225 21 22 38 27 133 39 237 28 706 38 1010 20z m-1305 -319 c-9 -50 1 -91 22 -91 5 0 8 -4 8 -9 0 -5 -15 -12 -34 -15 -19 -4 -45 -15 -57 -25 -54 -41 -169 1 -169 61 0 13 -7 33 -15 44 -20 27 -18 44 5 44 13 0 24 -10 30 -27 29 -81 73 -112 111 -77 11 10 28 32 37 49 26 51 63 107 68 103 2 -3 0 -28 -6 -57z m1881 -20 c41 -72 58 -91 80 -91 29 0 70 42 78 80 5 28 12 36 34 38 32 4 33 0 10 -35 -9 -14 -17 -36 -18 -47 0 -12 -16 -36 -35 -53 -42 -37 -96 -42 -134 -12 -13 10 -32 19 -43 19 -10 0 -25 4 -33 10 -12 8 -12 11 3 28 19 21 22 61 7 110 -8 29 -7 32 5 22 8 -7 29 -38 46 -69z m-1711 -72 c0 -5 -11 -9 -25 -9 -27 0 -32 9 -13 28 12 12 38 -1 38 -19z" />
+                    <path d="M1375 1113 c-214 -9 -526 -60 -580 -93 -70 -43 -165 -170 -244 -325 l-38 -74 -23 24 c-15 16 -20 30 -15 44 10 33 -3 58 -36 70 -45 15 -189 26 -189 14 0 -9 33 -41 115 -112 l39 -34 -38 7 c-90 17 -110 29 -135 80 -29 57 -37 51 -18 -14 15 -53 45 -76 150 -116 40 -15 74 -29 76 -31 2 -1 -30 -38 -71 -81 -58 -61 -77 -88 -86 -125 -15 -56 -16 -187 -2 -187 6 0 10 29 10 68 1 71 17 131 45 161 9 10 53 44 99 76 l84 57 118 -85 c131 -93 284 -191 290 -184 2 2 -16 18 -40 35 -56 40 -175 140 -247 207 l-57 52 92 11 c342 42 1481 39 1810 -4 l50 -7 -70 -64 c-38 -35 -105 -91 -148 -126 -44 -34 -91 -72 -105 -85 -26 -23 -26 -23 -2 -11 45 22 225 141 303 200 43 33 80 59 83 59 3 0 46 -28 95 -63 109 -75 129 -108 138 -230 6 -78 6 -80 14 -37 9 55 0 143 -19 189 -8 18 -45 65 -83 104 l-68 69 41 16 c23 9 69 30 102 47 54 27 62 35 78 79 24 67 16 80 -14 20 -25 -51 -40 -60 -129 -79 -33 -7 -31 -5 45 69 l80 77 -82 -5 c-45 -3 -98 -12 -117 -20 -32 -13 -36 -19 -36 -51 0 -21 -8 -47 -20 -62 l-19 -24 -37 73 c-74 148 -161 268 -227 316 -101 72 -562 123 -962 105z m570 -83 c88 -5 202 -15 254 -22 93 -12 94 -12 123 -52 58 -80 128 -246 128 -302 0 -5 -120 -10 -268 -12 -147 -1 -349 -7 -448 -12 -116 -7 -241 -7 -345 -1 -90 6 -253 11 -362 13 l-198 3 -6 24 c-3 13 -3 74 0 135 4 69 2 105 -3 96 -15 -24 -60 -162 -68 -210 -7 -41 -9 -43 -45 -44 -45 -1 -45 4 -16 100 26 84 78 190 111 225 21 22 38 27 133 39 237 28 706 38 1010 20z m-1305 -319 c-9 -50 1 -91 22 -91 20 0 8 -4 8 -9 0 -5 -15 -12 -34 -15 -19 -4 -45 -15 -57 -25 -54 -41 -169 1 -169 61 0 13 -7 33 -15 44 -20 27 -18 44 5 44 13 0 24 -10 30 -27 29 -81 73 -112 111 -77 11 10 28 32 37 49 26 51 63 107 68 103 2 -3 0 -28 -6 -57z m1881 -20 c41 -72 58 -91 80 -91 29 0 70 42 78 80 5 28 12 36 34 38 32 4 33 0 10 -35 -9 -14 -17 -36 -18 -47 0 -12 -16 -36 -35 -53 -42 -37 -96 -42 -134 -12 -13 10 -32 19 -43 19 -10 0 -25 4 -33 10 -12 8 -12 11 3 28 19 21 22 61 7 110 -8 29 -7 32 5 22 8 -7 29 -38 46 -69z m-1711 -72 c0 -5 -11 -9 -25 -9 -27 0 -32 9 -13 28 12 12 38 -1 38 -19z" />
                     <path d="M354 302 c11 -43 62 -148 91 -186 16 -21 45 -42 73 -53 44 -17 109 -18 1032 -18 542 0 1002 4 1023 8 72 15 132 91 178 225 10 29 15 52 11 50 -165 -83 -212 -102 -312 -127 -262 -65 -517 -85 -1005 -78 -359 5 -492 16 -695 58 -133 27 -221 56 -318 106 l-84 43 6 -28z m2336 -69 c-12 -16 -35 -47 -51 -71 -44 -63 -77 -74 -249 -78 -143 -3 -144 -3 -85 11 170 40 205 50 270 76 43 18 78 40 93 59 13 16 28 30 33 30 6 0 1 -12 -11 -27z m-2180 -50 c67 -30 136 -51 257 -78 l108 -25 -150 4 c-82 3 -165 10 -183 16 -19 7 -45 30 -62 55 -30 43 -37 60 -22 52 4 -2 27 -13 52 -24z m1735 -84 c-4 -5 -30 -8 -58 -8 l-52 1 50 13 c51 12 70 11 60 -6z" />
                     </g>
                 </svg>
@@ -737,18 +901,21 @@ const App = () => {
                             <div className="form-grid">
                                 <div className="form-group autocomplete-container" ref={suggestionsRef}>
                                     <label htmlFor="dealership-name">Dealership Name</label>
-                                    <input
-                                        type="text"
-                                        id="dealership-name"
-                                        name="dealership-name"
-                                        value={dealershipName}
-                                        onChange={handleDealershipChange}
-                                        onKeyDown={handleDealerKeyDown}
-                                        onFocus={() => setSuggestionsVisible(true)}
-                                        placeholder="Enter dealership name"
-                                        aria-label="Dealership Name"
-                                        autoComplete="off"
-                                    />
+                                    <div className="dealer-input-wrapper">
+                                        <input
+                                            type="text"
+                                            id="dealership-name"
+                                            name="dealership-name"
+                                            value={dealershipName}
+                                            onChange={handleDealershipChange}
+                                            onKeyDown={handleDealerKeyDown}
+                                            onFocus={() => setSuggestionsVisible(true)}
+                                            placeholder="Enter dealership name"
+                                            aria-label="Dealership Name"
+                                            autoComplete="off"
+                                        />
+                                        <DealerStatusIndicator status={dealerStatus} />
+                                    </div>
                                     {suggestionsVisible && dealershipName.trim().length > 0 && (
                                         <ul className="suggestions-list" role="listbox">
                                             {loadingSuggestions ? (
@@ -758,7 +925,7 @@ const App = () => {
                                                     <li
                                                         key={dealer.dealer_name}
                                                         className={index === highlightedIndex ? 'highlighted' : ''}
-                                                        onClick={() => handleSuggestionClick(dealer.dealer_name)}
+                                                        onClick={() => handleSuggestionClick(dealer)}
                                                         onMouseOver={() => setHighlightedIndex(index)}
                                                         role="option"
                                                         aria-selected={index === highlightedIndex}
@@ -787,7 +954,7 @@ const App = () => {
                                 </div>
                             </div>
                             <div className="button-group">
-                                 <button type="submit" className="btn btn-search" disabled={loadingVehicles}>
+                                 <button type="submit" className="btn btn-search" disabled={loadingVehicles || dealerStatus === 'checking' || dealerStatus === 'error'}>
                                     {loadingVehicles ? 'Searching...' : <><SearchIcon /> Search</>}
                                 </button>
                             </div>
