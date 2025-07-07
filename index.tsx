@@ -1,10 +1,22 @@
-import React, { useState, useEffect, useMemo, FC } from 'react';
+import React, { useState, useEffect, useMemo, FC, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+
+// --- Environment Variable Helper ---
+const safeGetEnv = (key: string): string | undefined => {
+    // In a browser environment without a build process, 'process' is not defined.
+    // This check prevents a ReferenceError.
+    if (typeof process !== 'undefined' && process.env) {
+        return process.env[key];
+    }
+    return undefined;
+};
+
 
 // --- Supabase Setup ---
-const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || 'https://sihuatwkfzpxfxmmwugn.supabase.co';
-const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1kZW1vIiwicm9sZSI6ImFub24iLCJleHAiOjE5ODM4MTI5OTZ9.CRXP1A7WOeoJeXxjNni43kdQwgnWNReilDMblYTn_I0';
+const supabaseUrl = safeGetEnv('REACT_APP_SUPABASE_URL') || 'https://sihuatwkfzpxfxmmwugn.supabase.co';
+const supabaseAnonKey = safeGetEnv('REACT_APP_SUPABASE_ANON_KEY') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNpaHVhdHdrZnpweGZ4bW13dWduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDYwMzcxOTgsImV4cCI6MjA2MTYxMzE5OH0.8PqLgBJvuCWr6erTMOferEJASX4YCOIyQCjTQxea0dc';
+const marketcheckApiKey = safeGetEnv('REACT_APP_MARKETCHECK_API_KEY') || '';
 
 const rootElement = document.getElementById('root');
 if (!rootElement) throw new Error('Root element not found');
@@ -266,10 +278,6 @@ const Footer: FC = () => {
 
 // --- Main App Component ---
 const App = () => {
-    const [dealers, setDealers] = useState<Dealer[]>([]);
-    const [loadingDealers, setLoadingDealers] = useState<boolean>(true);
-    const [errorDealers, setErrorDealers] = useState<string | null>(null);
-
     const [dealershipName, setDealershipName] = useState<string>('');
     const [amountQualified, setAmountQualified] = useState<string>('');
     
@@ -286,7 +294,14 @@ const App = () => {
     
     const [theme, setTheme] = useState('light');
 
-    const supabase = useMemo(() => {
+    // --- Autocomplete State ---
+    const [suggestions, setSuggestions] = useState<Dealer[]>([]);
+    const [loadingSuggestions, setLoadingSuggestions] = useState(false);
+    const [suggestionsVisible, setSuggestionsVisible] = useState(false);
+    const [highlightedIndex, setHighlightedIndex] = useState(-1);
+    const suggestionsRef = useRef<HTMLDivElement>(null);
+
+    const supabase: SupabaseClient | null = useMemo(() => {
         if (!supabaseUrl || !supabaseAnonKey) {
             console.error("Supabase URL or Anon Key is missing.");
             return null;
@@ -301,34 +316,80 @@ const App = () => {
     const toggleTheme = () => {
         setTheme(prev => (prev === 'light' ? 'dark' : 'light'));
     };
+    
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (suggestionsRef.current && !suggestionsRef.current.contains(event.target as Node)) {
+                setSuggestionsVisible(false);
+            }
+        };
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => {
+            document.removeEventListener("mousedown", handleClickOutside);
+        };
+    }, []);
 
     useEffect(() => {
-        if (!supabase) {
-            setErrorDealers("Supabase client could not be initialized.");
-            setLoadingDealers(false);
-            return;
-        }
-        const fetchDealers = async () => {
-            setLoadingDealers(true);
-            setErrorDealers(null);
-            const { data, error } = await supabase
-                .from('dealer_site')
-                .select('dealer_name, website')
-                .not('dealer_name', 'is', null);
-
-            if (error) {
-                setErrorDealers(`Could not fetch dealers: ${error.message}`);
-            } else if (data) {
-                const uniqueDealers = Array.from(new Map(data.map(item => [item.dealer_name, item])).values());
-                setDealers(uniqueDealers);
+        const handler = setTimeout(async () => {
+            if (dealershipName.trim() && supabase) {
+                setLoadingSuggestions(true);
+                const { data, error } = await supabase
+                    .from('dealer_site')
+                    .select('dealer_name, website')
+                    .not('dealer_name', 'is', null)
+                    .ilike('dealer_name', `%${dealershipName.trim()}%`)
+                    .limit(10);
+                
+                if (error) {
+                    console.error('Error fetching suggestions:', error.message);
+                    setSuggestions([]);
+                } else if (data) {
+                    const uniqueDealers = Array.from(new Map(data.map(item => [item.dealer_name, item])).values());
+                    setSuggestions(uniqueDealers);
+                } else {
+                    setSuggestions([]);
+                }
+                setLoadingSuggestions(false);
             } else {
-                setDealers([]);
+                setSuggestions([]);
             }
-            setLoadingDealers(false);
+        }, 300);
+
+        return () => {
+            clearTimeout(handler);
         };
-        fetchDealers();
-    }, [supabase]);
+    }, [dealershipName, supabase]);
+
+    const handleDealershipChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        setDealershipName(e.target.value);
+        setHighlightedIndex(-1);
+        setSuggestionsVisible(true);
+    };
+
+    const handleSuggestionClick = (dealerName: string) => {
+        setDealershipName(dealerName);
+        setSuggestionsVisible(false);
+    };
     
+    const handleDealerKeyDown = (e: React.KeyboardEvent) => {
+        if (suggestions.length === 0 || !suggestionsVisible) return;
+
+        if (e.key === 'ArrowDown') {
+            e.preventDefault();
+            setHighlightedIndex(prev => (prev < suggestions.length - 1 ? prev + 1 : prev));
+        } else if (e.key === 'ArrowUp') {
+            e.preventDefault();
+            setHighlightedIndex(prev => (prev > 0 ? prev - 1 : 0));
+        } else if (e.key === 'Enter') {
+            if (highlightedIndex > -1) {
+                e.preventDefault();
+                handleSuggestionClick(suggestions[highlightedIndex].dealer_name);
+            }
+        } else if (e.key === 'Escape') {
+            setSuggestionsVisible(false);
+        }
+    };
+
     const handleApplyFilters = (newFilters: Filters) => {
         setFilters(newFilters);
         setCurrentPage(1);
@@ -343,6 +404,7 @@ const App = () => {
 
     const handleFindVehicles = async (e: React.FormEvent) => {
         e.preventDefault();
+        setSuggestionsVisible(false);
         setLoadingVehicles(true);
         setErrorVehicles(null);
         setNoInventoryInfo(null);
@@ -363,24 +425,38 @@ const App = () => {
             setLoadingVehicles(false);
             return;
         }
-
-        const selectedDealer = dealers.find(
-            (d) => d.dealer_name.toLowerCase() === dealershipName.toLowerCase().trim()
-        );
-
-        if (!selectedDealer || !selectedDealer.website) {
-            setErrorVehicles(`Could not find a website for "${dealershipName}". This name may not be in our system, or it's missing a website. Please select a valid dealership from the suggestion list.`);
+        if (!supabase) {
+            setErrorVehicles("Database connection is not available.");
+            setLoadingVehicles(false);
+            return;
+        }
+        if (!marketcheckApiKey) {
+            setErrorVehicles("Vehicle search is temporarily unavailable. Please contact support.");
             setLoadingVehicles(false);
             return;
         }
         
+        const { data: dealerData, error: dealerError } = await supabase
+            .from('dealer_site')
+            .select('dealer_name, website')
+            .eq('dealer_name', dealershipName.trim())
+            .limit(1)
+            .single();
+
+        if (dealerError || !dealerData || !dealerData.website) {
+            setErrorVehicles(`Could not find a website for "${dealershipName}". Please select a valid dealership from the suggestion list.`);
+            setLoadingVehicles(false);
+            return;
+        }
+
+        const selectedDealer = dealerData as Dealer;
         const source = selectedDealer.website;
 
         try {
             const API_PAGE_SIZE = 50;
     
             const firstApiUrl = new URL('https://mc-api.marketcheck.com/v2/car/dealer/inventory/active');
-            firstApiUrl.searchParams.append('api_key', process.env.REACT_APP_MARKETCHECK_API_KEY || '');
+            firstApiUrl.searchParams.append('api_key', marketcheckApiKey);
             firstApiUrl.searchParams.append('source', source);
             firstApiUrl.searchParams.append('car_type', 'used');
             firstApiUrl.searchParams.append('rows', API_PAGE_SIZE.toString());
@@ -421,7 +497,7 @@ const App = () => {
                         await delay(250);
 
                         const apiUrl = new URL('https://mc-api.marketcheck.com/v2/car/dealer/inventory/active');
-                        apiUrl.searchParams.append('api_key', process.env.REACT_APP_MARKETCHECK_API_KEY || '');
+                        apiUrl.searchParams.append('api_key', marketcheckApiKey);
                         apiUrl.searchParams.append('source', source);
                         apiUrl.searchParams.append('car_type', 'used');
                         apiUrl.searchParams.append('rows', API_PAGE_SIZE.toString());
@@ -511,6 +587,105 @@ const App = () => {
     const indexOfFirstVehicle = indexOfLastVehicle - VEHICLES_PER_PAGE;
     const currentVehicles = filteredVehicles.slice(indexOfFirstVehicle, indexOfLastVehicle);
 
+    const renderResultsContent = () => {
+        if (loadingVehicles) {
+            return <p className="status-message">Finding best deals for you...</p>;
+        }
+
+        if (errorVehicles) {
+            return <p className="error-message">{errorVehicles}</p>;
+        }
+
+        if (noInventoryInfo) {
+            return (
+                <div className="info-card">
+                    <h2>No Inventory Found</h2>
+                    <p>
+                        We couldn't find any inventory for <strong>{noInventoryInfo.dealerName}</strong> (using source: <strong>{noInventoryInfo.source}</strong>).
+                    </p>
+                    <p>This could be because the dealership has no online inventory with our partner, or the source name is incorrect.</p>
+                    
+                    <div className="api-url-container">
+                        <p className="api-url-label">API URL Used</p>
+                        <code className="api-url-code">{noInventoryInfo.apiUrl}</code>
+                    </div>
+                    
+                    {noInventoryInfo.website && (
+                        <a href={noInventoryInfo.website.startsWith('http') ? noInventoryInfo.website : `http://${noInventoryInfo.website}`} target="_blank" rel="noopener noreferrer" className="btn btn-website">
+                            Visit Website
+                        </a>
+                    )}
+                </div>
+            );
+        }
+
+        const resultsHeader = vehicles.length > 0 && (
+            <div className="results-header">
+                <p className="results-count">
+                    Showing <strong>{filteredVehicles.length}</strong> of <strong>{vehicles.length}</strong> vehicles
+                </p>
+                <button onClick={() => setIsFilterModalOpen(true)} className="btn btn-filter">
+                    <FilterIcon /> Filter
+                </button>
+            </div>
+        );
+
+        if (filteredVehicles.length > 0) {
+            return (
+                <>
+                    {resultsHeader}
+                    <div className="results-grid">
+                        {currentVehicles.map(vehicle => (
+                            <div key={vehicle.id} className="vehicle-card">
+                                {vehicle.imageUrl ? (
+                                    <img src={vehicle.imageUrl} alt={vehicle.name} className="vehicle-card-image" />
+                                ) : (
+                                    <div className="vehicle-image-placeholder">
+                                        <CameraIcon />
+                                        <p>PHOTOS COMING SOON</p>
+                                    </div>
+                                )}
+                                <div className="vehicle-card-content">
+                                    <h3>{vehicle.name}</h3>
+                                    <div className="vehicle-price-info">
+                                        <span className="vehicle-price">{formatCurrency(vehicle.price)}</span>
+                                        <span className="vehicle-est-payment">Est. {formatCurrency(vehicle.estPayment)}/mo</span>
+                                    </div>
+                                    <p className="vehicle-details">
+                                        VIN: {vehicle.vin}
+                                        {(vehicle.miles !== null) && 
+                                            ` | Miles: ${new Intl.NumberFormat().format(vehicle.miles)}`}
+                                    </p>
+                                    <a href={vehicle.websiteUrl} target="_blank" rel="noopener noreferrer" className="btn btn-website">
+                                        Website
+                                    </a>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    <Pagination
+                        itemsPerPage={VEHICLES_PER_PAGE}
+                        totalItems={filteredVehicles.length}
+                        currentPage={currentPage}
+                        onPageChange={setCurrentPage}
+                    />
+                </>
+            );
+        }
+        
+        return (
+            <>
+                {resultsHeader}
+                <p className="status-message">
+                    {vehicles.length > 0 ? 
+                        "No vehicles match your filter criteria. Try adjusting your filters." : 
+                        `No vehicles found under ${formatCurrency(numericAmountValue)}. Try a higher amount or a different dealership.`
+                    }
+                </p>
+            </>
+        );
+    };
+
     return (
         <div className="app-container">
             <header className="header">
@@ -534,24 +709,42 @@ const App = () => {
                     <div className="search-card">
                         <form onSubmit={handleFindVehicles}>
                             <div className="form-grid">
-                                <div className="form-group">
+                                <div className="form-group autocomplete-container" ref={suggestionsRef}>
                                     <label htmlFor="dealership-name">Dealership Name</label>
                                     <input
                                         type="text"
                                         id="dealership-name"
                                         name="dealership-name"
-                                        list="dealers-list"
                                         value={dealershipName}
-                                        onChange={(e) => setDealershipName(e.target.value)}
-                                        placeholder={loadingDealers ? "Loading dealers..." : "Enter dealership name"}
+                                        onChange={handleDealershipChange}
+                                        onKeyDown={handleDealerKeyDown}
+                                        onFocus={() => setSuggestionsVisible(true)}
+                                        placeholder="Enter dealership name"
                                         aria-label="Dealership Name"
-                                        disabled={loadingDealers}
+                                        autoComplete="off"
                                     />
-                                    <datalist id="dealers-list">
-                                        {dealershipName.length > 0 && dealers.map(dealer => (
-                                            <option key={dealer.dealer_name} value={dealer.dealer_name} />
-                                        ))}
-                                    </datalist>
+                                    {suggestionsVisible && dealershipName.trim().length > 0 && (
+                                        <ul className="suggestions-list" role="listbox">
+                                            {loadingSuggestions ? (
+                                                <li className="suggestion-item-static">Loading...</li>
+                                            ) : suggestions.length > 0 ? (
+                                                suggestions.map((dealer, index) => (
+                                                    <li
+                                                        key={dealer.dealer_name}
+                                                        className={index === highlightedIndex ? 'highlighted' : ''}
+                                                        onClick={() => handleSuggestionClick(dealer.dealer_name)}
+                                                        onMouseOver={() => setHighlightedIndex(index)}
+                                                        role="option"
+                                                        aria-selected={index === highlightedIndex}
+                                                    >
+                                                        {dealer.dealer_name}
+                                                    </li>
+                                                ))
+                                            ) : (
+                                                <li className="suggestion-item-static">No results found.</li>
+                                            )}
+                                        </ul>
+                                    )}
                                 </div>
                                 <div className="form-group">
                                     <label htmlFor="amount-qualified">$ Amount Qualified</label>
@@ -584,91 +777,7 @@ const App = () => {
                 
                 {searched && (
                     <div className="results">
-                        {loadingVehicles && <p className="status-message">Finding best deals for you...</p>}
-                        
-                        {!loadingVehicles && errorVehicles && <p className="error-message">{errorVehicles}</p>}
-
-                        {!loadingVehicles && !errorVehicles && noInventoryInfo && (
-                            <div className="info-card">
-                                <h2>No Inventory Found</h2>
-                                <p>
-                                    We couldn't find any inventory for <strong>{noInventoryInfo.dealerName}</strong> (using source: <strong>{noInventoryInfo.source}</strong>).
-                                </p>
-                                <p>This could be because the dealership has no online inventory with our partner, or the source name is incorrect.</p>
-                                
-                                <div className="api-url-container">
-                                  <p className="api-url-label">API URL Used</p>
-                                  <code className="api-url-code">{noInventoryInfo.apiUrl}</code>
-                                </div>
-                                
-                                {noInventoryInfo.website && (
-                                    <a href={noInventoryInfo.website.startsWith('http') ? noInventoryInfo.website : `http://${noInventoryInfo.website}`} target="_blank" rel="noopener noreferrer" className="btn btn-website">
-                                        Visit Website
-                                    </a>
-                                )}
-                            </div>
-                        )}
-
-                        {!loadingVehicles && !errorVehicles && !noInventoryInfo && (
-                             <>
-                                {vehicles.length > 0 && (
-                                    <div className="results-header">
-                                        <p className="results-count">
-                                            Showing <strong>{filteredVehicles.length}</strong> of <strong>{vehicles.length}</strong> vehicles
-                                        </p>
-                                        <button onClick={() => setIsFilterModalOpen(true)} className="btn btn-filter">
-                                            <FilterIcon /> Filter
-                                        </button>
-                                    </div>
-                                )}
-                                {filteredVehicles.length > 0 ? (
-                                    <>
-                                        <div className="results-grid">
-                                            {currentVehicles.map(vehicle => (
-                                                <div key={vehicle.id} className="vehicle-card">
-                                                    {vehicle.imageUrl ? (
-                                                        <img src={vehicle.imageUrl} alt={vehicle.name} className="vehicle-card-image" />
-                                                    ) : (
-                                                        <div className="vehicle-image-placeholder">
-                                                            <CameraIcon />
-                                                            <p>PHOTOS COMING SOON</p>
-                                                        </div>
-                                                    )}
-                                                    <div className="vehicle-card-content">
-                                                        <h3>{vehicle.name}</h3>
-                                                        <div className="vehicle-price-info">
-                                                            <span className="vehicle-price">{formatCurrency(vehicle.price)}</span>
-                                                            <span className="vehicle-est-payment">Est. {formatCurrency(vehicle.estPayment)}/mo</span>
-                                                        </div>
-                                                        <p className="vehicle-details">
-                                                            VIN: {vehicle.vin}
-                                                            {(vehicle.miles !== null) && 
-                                                                ` | Miles: ${new Intl.NumberFormat().format(vehicle.miles)}`}
-                                                        </p>
-                                                        <a href={vehicle.websiteUrl} target="_blank" rel="noopener noreferrer" className="btn btn-website">
-                                                            Website
-                                                        </a>
-                                                    </div>
-                                                </div>
-                                            ))}
-                                        </div>
-                                        <Pagination
-                                            itemsPerPage={VEHICLES_PER_PAGE}
-                                            totalItems={filteredVehicles.length}
-                                            currentPage={currentPage}
-                                            onPageChange={setCurrentPage}
-                                        />
-                                    </>
-                                ) : (
-                                     <p className="status-message">
-                                        {vehicles.length > 0 ? 
-                                            "No vehicles match your filter criteria. Try adjusting your filters." : 
-                                            `No vehicles found under ${formatCurrency(numericAmountValue)}. Try a higher amount or a different dealership.`
-                                        }
-                                    </p>
-                                )}
-                            </>
-                        )}
+                        {renderResultsContent()}
                     </div>
                 )}
             </main>
