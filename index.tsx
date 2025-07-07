@@ -1,21 +1,36 @@
-import React, { useState, useEffect, useMemo, FC, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
 // --- Environment Variable Helper ---
 const safeGetEnv = (key: string): string | undefined => {
-    // In a browser environment without a build process, 'process' is not defined.
-    // This check prevents a ReferenceError.
+    // For React apps, environment variables are available at build time
+    // and embedded in the bundle for variables starting with REACT_APP_
+    if (typeof window !== 'undefined') {
+        // In browser environment, check for variables embedded in `window.__ENV__`
+        // or available via a polyfilled `process.env`.
+        const windowEnv = (window as any).__ENV__?.[key];
+        if (windowEnv) {
+            return windowEnv;
+        }
+        // Safely check process.env only if it exists.
+        if (typeof process !== 'undefined' && process.env) {
+            return process.env[key];
+        }
+    }
+    
+    // During build/server-side (when window is not defined)
     if (typeof process !== 'undefined' && process.env) {
         return process.env[key];
     }
+    
     return undefined;
 };
 
 
 // --- Supabase Setup ---
-const supabaseUrl = safeGetEnv('REACT_APP_SUPABASE_URL') || 'https://sihuatwkfzpxfxmmwugn.supabase.co';
-const supabaseAnonKey = safeGetEnv('REACT_APP_SUPABASE_ANON_KEY') || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNpaHVhdHdrZnpweGZ4bW13dWduIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDYwMzcxOTgsImV4cCI6MjA2MTYxMzE5OH0.8PqLgBJvuCWr6erTMOferEJASX4YCOIyQCjTQxea0dc';
+const supabaseUrl = safeGetEnv('REACT_APP_SUPABASE_URL');
+const supabaseAnonKey = safeGetEnv('REACT_APP_SUPABASE_ANON_KEY');
 const marketcheckApiKey = safeGetEnv('REACT_APP_MARKETCHECK_API_KEY') || '';
 
 const rootElement = document.getElementById('root');
@@ -77,13 +92,13 @@ const initialFiltersState: Filters = {
 
 
 // --- SVG Icon Components ---
-const SearchIcon: FC = () => (
+const SearchIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
 );
-const CameraIcon: FC = () => (
+const CameraIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"></path><circle cx="12" cy="13" r="3"></circle></svg>
 );
-const FilterIcon: FC = () => (
+const FilterIcon = () => (
     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
         <path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"></path>
     </svg>
@@ -104,12 +119,13 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 
 // --- Child Components ---
-const Pagination: FC<{
+interface PaginationProps {
   itemsPerPage: number;
   totalItems: number;
   currentPage: number;
   onPageChange: (pageNumber: number) => void;
-}> = ({ itemsPerPage, totalItems, currentPage, onPageChange }) => {
+}
+const Pagination = ({ itemsPerPage, totalItems, currentPage, onPageChange }: PaginationProps) => {
     const pageNumbers = [];
     const totalPages = Math.ceil(totalItems / itemsPerPage);
 
@@ -146,14 +162,15 @@ const Pagination: FC<{
     );
 };
 
-const FilterModal: FC<{
+interface FilterModalProps {
     isOpen: boolean;
     onClose: () => void;
     onApply: (newFilters: Filters) => void;
     onReset: () => void;
     vehicles: Vehicle[];
     initialFilters: Filters;
-}> = ({ isOpen, onClose, onApply, onReset, vehicles, initialFilters }) => {
+}
+const FilterModal = ({ isOpen, onClose, onApply, onReset, vehicles, initialFilters }: FilterModalProps) => {
     const [localFilters, setLocalFilters] = useState(initialFilters);
 
     useEffect(() => {
@@ -267,7 +284,7 @@ const FilterModal: FC<{
 };
 
 
-const Footer: FC = () => {
+const Footer = () => {
     return (
         <footer className="footer">
             <p>&copy; {new Date().getFullYear()} Inventory Search. All rights reserved.</p>
@@ -402,154 +419,163 @@ const App = () => {
         setIsFilterModalOpen(false);
     };
 
-    const handleFindVehicles = async (e: React.FormEvent) => {
+    const handleFindVehicles = (e: React.FormEvent) => {
         e.preventDefault();
         setSuggestionsVisible(false);
-        setLoadingVehicles(true);
-        setErrorVehicles(null);
-        setNoInventoryInfo(null);
-        setSearched(true);
-        setVehicles([]);
-        setCurrentPage(1);
-        setFilters(initialFiltersState);
 
-        const numericAmount = Number(amountQualified.replace(/[^0-9.]/g, ''));
+        const performSearch = async () => {
+            setLoadingVehicles(true);
+            setErrorVehicles(null);
+            setNoInventoryInfo(null);
+            setSearched(true);
+            setVehicles([]);
+            setCurrentPage(1);
+            setFilters(initialFiltersState);
 
-        if (!dealershipName) {
-            setErrorVehicles("Please enter a dealership name.");
-            setLoadingVehicles(false);
-            return;
-        }
-        if (!numericAmount || numericAmount <= 0) {
-            setErrorVehicles("Please enter a valid qualified amount.");
-            setLoadingVehicles(false);
-            return;
-        }
-        if (!supabase) {
-            setErrorVehicles("Database connection is not available.");
-            setLoadingVehicles(false);
-            return;
-        }
-        if (!marketcheckApiKey) {
-            setErrorVehicles("Vehicle search is temporarily unavailable. Please contact support.");
-            setLoadingVehicles(false);
-            return;
-        }
-        
-        const { data: dealerData, error: dealerError } = await supabase
-            .from('dealer_site')
-            .select('dealer_name, website')
-            .eq('dealer_name', dealershipName.trim())
-            .limit(1)
-            .single();
+            const numericAmount = Number(amountQualified.replace(/[^0-9.]/g, ''));
 
-        if (dealerError || !dealerData || !dealerData.website) {
-            setErrorVehicles(`Could not find a website for "${dealershipName}". Please select a valid dealership from the suggestion list.`);
-            setLoadingVehicles(false);
-            return;
-        }
-
-        const selectedDealer = dealerData as Dealer;
-        const source = selectedDealer.website;
-
-        try {
-            const API_PAGE_SIZE = 50;
-    
-            const firstApiUrl = new URL('https://mc-api.marketcheck.com/v2/car/dealer/inventory/active');
-            firstApiUrl.searchParams.append('api_key', marketcheckApiKey);
-            firstApiUrl.searchParams.append('source', source);
-            firstApiUrl.searchParams.append('car_type', 'used');
-            firstApiUrl.searchParams.append('rows', API_PAGE_SIZE.toString());
-            firstApiUrl.searchParams.append('start', '0');
-            firstApiUrl.searchParams.append('include_non_vin_listings', 'true');
-    
-            const firstResponse = await fetch(firstApiUrl.toString());
-    
-            if (!firstResponse.ok) {
-                let errorBody = 'An unknown API error occurred.';
-                try {
-                    const errorJson = await firstResponse.json();
-                    errorBody = errorJson.error?.message || JSON.stringify(errorJson);
-                } catch (jsonError) {
-                    errorBody = `Status ${firstResponse.status} ${firstResponse.statusText}`;
-                }
-                throw new Error(`API Request Failed: ${errorBody}\n\nURL Used: ${firstApiUrl.toString()}`);
+            if (!dealershipName) {
+                setErrorVehicles("Please enter a dealership name.");
+                setLoadingVehicles(false);
+                return;
             }
-    
-            const firstApiResponse = await firstResponse.json();
-            const numFound = firstApiResponse.num_found || 0;
-            const initialListings = firstApiResponse.listings || [];
-    
-            if (numFound === 0) {
-                setNoInventoryInfo({
-                    dealerName: selectedDealer.dealer_name,
-                    source: source,
-                    website: selectedDealer.website,
-                    apiUrl: firstApiUrl.toString(),
-                });
-                setVehicles([]);
-            } else {
-                let allListings = [...initialListings];
-                const totalPages = Math.ceil(numFound / API_PAGE_SIZE);
-                
-                if (totalPages > 1) {
-                    for (let i = 1; i < totalPages; i++) {
-                        await delay(250);
+            if (!numericAmount || numericAmount <= 0) {
+                setErrorVehicles("Please enter a valid qualified amount.");
+                setLoadingVehicles(false);
+                return;
+            }
+            if (!supabase) {
+                setErrorVehicles("Database connection is not available.");
+                setLoadingVehicles(false);
+                return;
+            }
+            if (!marketcheckApiKey) {
+                setErrorVehicles("Vehicle search is temporarily unavailable. Please contact support.");
+                setLoadingVehicles(false);
+                return;
+            }
+            
+            const { data: dealerData, error: dealerError } = await supabase
+                .from('dealer_site')
+                .select('dealer_name, website')
+                .eq('dealer_name', dealershipName.trim())
+                .limit(1)
+                .single();
 
-                        const apiUrl = new URL('https://mc-api.marketcheck.com/v2/car/dealer/inventory/active');
-                        apiUrl.searchParams.append('api_key', marketcheckApiKey);
-                        apiUrl.searchParams.append('source', source);
-                        apiUrl.searchParams.append('car_type', 'used');
-                        apiUrl.searchParams.append('rows', API_PAGE_SIZE.toString());
-                        apiUrl.searchParams.append('start', (i * API_PAGE_SIZE).toString());
-                        apiUrl.searchParams.append('include_non_vin_listings', 'true');
-                        
-                        const pageResponse = await fetch(apiUrl.toString());
-                        if (!pageResponse.ok) {
-                             console.warn(`API Error for ${apiUrl.toString()}: ${pageResponse.status} ${pageResponse.statusText}`);
-                             continue;
-                        }
-                        const pageData = await pageResponse.json();
-                        if (pageData.listings && pageData.listings.length > 0) {
-                            allListings.push(...pageData.listings);
-                        }
+            if (dealerError || !dealerData || !dealerData.website) {
+                setErrorVehicles(`Could not find a website for "${dealershipName}". Please select a valid dealership from the suggestion list.`);
+                setLoadingVehicles(false);
+                return;
+            }
+
+            const source = dealerData.website;
+
+            try {
+                const API_PAGE_SIZE = 50;
+        
+                const firstApiUrl = new URL('https://mc-api.marketcheck.com/v2/car/dealer/inventory/active');
+                firstApiUrl.searchParams.append('api_key', marketcheckApiKey);
+                firstApiUrl.searchParams.append('source', source);
+                firstApiUrl.searchParams.append('car_type', 'used');
+                firstApiUrl.searchParams.append('rows', API_PAGE_SIZE.toString());
+                firstApiUrl.searchParams.append('start', '0');
+                firstApiUrl.searchParams.append('include_non_vin_listings', 'true');
+        
+                const firstResponse = await fetch(firstApiUrl.toString());
+        
+                if (!firstResponse.ok) {
+                    let errorBody = 'An unknown API error occurred.';
+                    try {
+                        const errorJson = await firstResponse.json();
+                        errorBody = errorJson.error?.message || JSON.stringify(errorJson);
+                    } catch (jsonError) {
+                        errorBody = `Status ${firstResponse.status} ${firstResponse.statusText}`;
                     }
+                    throw new Error(`API Request Failed: ${errorBody}\n\nURL Used: ${firstApiUrl.toString()}`);
                 }
-                
-                const filteredListings = allListings.filter(listing => {
-                     const price = Number(listing.price) || 0;
-                     return price <= numericAmount;
-                });
-
-                filteredListings.sort((a, b) => (Number(a.price) || 0) - (Number(b.price) || 0));
-    
-                if (filteredListings.length === 0) {
+        
+                const firstApiResponse = await firstResponse.json();
+                const numFound = firstApiResponse.num_found || 0;
+                const initialListings = firstApiResponse.listings || [];
+        
+                if (numFound === 0) {
+                    setNoInventoryInfo({
+                        dealerName: dealerData.dealer_name,
+                        source: source,
+                        website: dealerData.website,
+                        apiUrl: firstApiUrl.toString(),
+                    });
                     setVehicles([]);
                 } else {
-                     const formattedVehicles: Vehicle[] = filteredListings.map((listing: any, index: number) => ({
-                        id: listing.id || listing.vin || `non-vin-listing-${index}`,
-                        vin: listing.vin || 'N/A',
-                        name: String(listing.heading || 'Untitled Vehicle'),
-                        price: Number(listing.price) || 0,
-                        miles: (listing.miles === null || typeof listing.miles === 'undefined') ? null : Number(listing.miles),
-                        websiteUrl: listing.vdp_url || '#',
-                        imageUrl: listing.media?.photo_links?.[0] || null,
-                        estPayment: Math.round((Number(listing.price) || 0) / 60),
-                        year: listing.build?.year || null,
-                        bodyType: listing.body_type || null,
-                        make: listing.build?.make || null,
-                        model: listing.build?.model || null,
-                        trim: listing.build?.trim || null,
-                    }));
-                    setVehicles(formattedVehicles);
+                    let allListings = [...initialListings];
+                    const totalPages = Math.ceil(numFound / API_PAGE_SIZE);
+                    
+                    if (totalPages > 1) {
+                        for (let i = 1; i < totalPages; i++) {
+                            await delay(250);
+
+                            const apiUrl = new URL('https://mc-api.marketcheck.com/v2/car/dealer/inventory/active');
+                            apiUrl.searchParams.append('api_key', marketcheckApiKey);
+                            apiUrl.searchParams.append('source', source);
+                            apiUrl.searchParams.append('car_type', 'used');
+                            apiUrl.searchParams.append('rows', API_PAGE_SIZE.toString());
+                            apiUrl.searchParams.append('start', (i * API_PAGE_SIZE).toString());
+                            apiUrl.searchParams.append('include_non_vin_listings', 'true');
+                            
+                            const pageResponse = await fetch(apiUrl.toString());
+                            if (!pageResponse.ok) {
+                                 console.warn(`API Error for ${apiUrl.toString()}: ${pageResponse.status} ${pageResponse.statusText}`);
+                                 continue;
+                            }
+                            const pageData = await pageResponse.json();
+                            if (pageData.listings && pageData.listings.length > 0) {
+                                allListings.push(...pageData.listings);
+                            }
+                        }
+                    }
+                    
+                    const filteredListings = allListings.filter(listing => {
+                         const price = Number(listing.price) || 0;
+                         return price <= numericAmount;
+                    });
+
+                    filteredListings.sort((a, b) => (Number(a.price) || 0) - (Number(b.price) || 0));
+        
+                    if (filteredListings.length === 0) {
+                        setVehicles([]);
+                    } else {
+                         const formattedVehicles: Vehicle[] = filteredListings.map((listing: any, index: number) => ({
+                            id: listing.id || listing.vin || `non-vin-listing-${index}`,
+                            vin: listing.vin || 'N/A',
+                            name: String(listing.heading || 'Untitled Vehicle'),
+                            price: Number(listing.price) || 0,
+                            miles: (listing.miles === null || typeof listing.miles === 'undefined') ? null : Number(listing.miles),
+                            websiteUrl: listing.vdp_url || '#',
+                            imageUrl: listing.media?.photo_links?.[0] || null,
+                            estPayment: Math.round((Number(listing.price) || 0) / 60),
+                            year: listing.build?.year || null,
+                            bodyType: listing.body_type || null,
+                            make: listing.build?.make || null,
+                            model: listing.build?.model || null,
+                            trim: listing.build?.trim || null,
+                        }));
+                        setVehicles(formattedVehicles);
+                    }
                 }
+            } catch (error: any) {
+                setErrorVehicles(error.message);
+            } finally {
+                setLoadingVehicles(false);
             }
-        } catch (error: any) {
-            setErrorVehicles(error.message);
-        } finally {
+        };
+
+        performSearch().catch((err) => {
+            console.error("Search failed:", err);
+            setErrorVehicles("An unexpected error occurred during the search.");
             setLoadingVehicles(false);
-        }
+        });
     };
+
 
     const handleAmountChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const rawValue = e.target.value;
@@ -679,7 +705,7 @@ const App = () => {
                 <p className="status-message">
                     {vehicles.length > 0 ? 
                         "No vehicles match your filter criteria. Try adjusting your filters." : 
-                        `No vehicles found under ${formatCurrency(numericAmountValue)}. Try a higher amount or a different dealership.`
+                        `No vehicles found under ${formatCurrency(numericAmountValue)}. Try a different dealership.`
                     }
                 </p>
             </>
